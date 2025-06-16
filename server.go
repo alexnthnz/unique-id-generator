@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/alexnthnz/unique-id-generator/config"
 	"github.com/alexnthnz/unique-id-generator/generator"
 	"github.com/alexnthnz/unique-id-generator/monitor"
 )
@@ -18,6 +19,7 @@ type HTTPServer struct {
 	generator *generator.SnowflakeGenerator
 	metrics   *monitor.Metrics
 	limiter   *rate.Limiter
+	config    *config.Config
 }
 
 // IDResponse represents the response for single ID generation
@@ -57,16 +59,33 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
-// NewHTTPServer creates a new HTTP server
+// NewHTTPServer creates a new HTTP server with default configuration
 func NewHTTPServer(gen *generator.SnowflakeGenerator, metrics *monitor.Metrics) *HTTPServer {
+	defaultConfig := config.DefaultConfig()
 	return &HTTPServer{
 		generator: gen,
 		metrics:   metrics,
-		limiter:   rate.NewLimiter(rate.Limit(1000), 100), // 1000 req/sec with burst of 100
+		limiter:   rate.NewLimiter(rate.Limit(defaultConfig.RateLimitRPS), defaultConfig.RateLimitBurst),
+		config:    defaultConfig,
 	}
 }
 
-// Start starts the HTTP server
+// NewHTTPServerWithConfig creates a new HTTP server with provided configuration
+func NewHTTPServerWithConfig(gen *generator.SnowflakeGenerator, metrics *monitor.Metrics, cfg *config.Config) *HTTPServer {
+	var limiter *rate.Limiter
+	if cfg.RateLimitEnabled {
+		limiter = rate.NewLimiter(rate.Limit(cfg.RateLimitRPS), cfg.RateLimitBurst)
+	}
+
+	return &HTTPServer{
+		generator: gen,
+		metrics:   metrics,
+		limiter:   limiter,
+		config:    cfg,
+	}
+}
+
+// Start starts the HTTP server using configuration settings
 func (s *HTTPServer) Start(addr string) error {
 	mux := http.NewServeMux()
 
@@ -83,22 +102,24 @@ func (s *HTTPServer) Start(addr string) error {
 	server := &http.Server{
 		Addr:           addr,
 		Handler:        handler,
-		ReadTimeout:    10 * time.Second,
-		WriteTimeout:   10 * time.Second,
-		IdleTimeout:    60 * time.Second,
-		MaxHeaderBytes: 1 << 20, // 1 MB
+		ReadTimeout:    s.config.ServerReadTimeout,
+		WriteTimeout:   s.config.ServerWriteTimeout,
+		IdleTimeout:    s.config.ServerIdleTimeout,
+		MaxHeaderBytes: s.config.MaxHeaderBytes,
 	}
 
 	return server.ListenAndServe()
 }
 
-// securityMiddleware adds rate limiting and request validation
+// securityMiddleware adds rate limiting and request validation using config
 func (s *HTTPServer) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Rate limiting
-		if !s.limiter.Allow() {
-			s.writeError(w, "Rate limit exceeded", http.StatusTooManyRequests)
-			return
+		// Rate limiting (only if enabled and limiter exists)
+		if s.config.RateLimitEnabled && s.limiter != nil {
+			if !s.limiter.Allow() {
+				s.writeError(w, "Rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
 		}
 
 		// Request size limiting
@@ -113,7 +134,7 @@ func (s *HTTPServer) securityMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleGenerateID handles single ID generation
+// handleGenerateID handles single ID generation with metrics check
 func (s *HTTPServer) handleGenerateID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" && r.Method != "POST" {
 		s.writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -125,12 +146,16 @@ func (s *HTTPServer) handleGenerateID(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(start)
 
 	if err != nil {
-		s.metrics.IncrementErrors()
+		if s.metrics != nil {
+			s.metrics.IncrementErrors()
+		}
 		s.writeError(w, fmt.Sprintf("Failed to generate ID: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	s.metrics.RecordLatency(duration)
+	if s.metrics != nil {
+		s.metrics.RecordLatency(duration)
+	}
 
 	components := s.generator.ParseID(id)
 	response := IDResponse{
@@ -146,7 +171,7 @@ func (s *HTTPServer) handleGenerateID(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleBatchGenerate handles batch ID generation with improved validation
+// handleBatchGenerate handles batch ID generation with config-based validation
 func (s *HTTPServer) handleBatchGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" && r.Method != "POST" {
 		s.writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -156,7 +181,7 @@ func (s *HTTPServer) handleBatchGenerate(w http.ResponseWriter, r *http.Request)
 	// Get count parameter with validation
 	countStr := r.URL.Query().Get("count")
 	if countStr == "" {
-		countStr = "10" // default
+		countStr = strconv.Itoa(s.config.DefaultBatchSize) // Use config default
 	}
 
 	count, err := strconv.Atoi(countStr)
@@ -165,7 +190,7 @@ func (s *HTTPServer) handleBatchGenerate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Enhanced validation
+	// Enhanced validation using config
 	if err := s.validateBatchCount(count); err != nil {
 		s.writeError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -176,7 +201,9 @@ func (s *HTTPServer) handleBatchGenerate(w http.ResponseWriter, r *http.Request)
 	duration := time.Since(start)
 
 	if err != nil {
-		s.metrics.IncrementErrors()
+		if s.metrics != nil {
+			s.metrics.IncrementErrors()
+		}
 		s.writeError(w, fmt.Sprintf("Failed to generate batch IDs: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -198,13 +225,13 @@ func (s *HTTPServer) handleBatchGenerate(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(response)
 }
 
-// validateBatchCount validates the batch count parameter
+// validateBatchCount validates the batch count parameter using config limits
 func (s *HTTPServer) validateBatchCount(count int) error {
 	if count <= 0 {
 		return fmt.Errorf("count must be positive, got %d", count)
 	}
-	if count > 10000 {
-		return fmt.Errorf("count must not exceed 10000, got %d", count)
+	if count > s.config.MaxBatchSize {
+		return fmt.Errorf("count must not exceed %d, got %d", s.config.MaxBatchSize, count)
 	}
 	return nil
 }

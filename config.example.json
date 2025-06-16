@@ -1,0 +1,29 @@
+{
+  "node_id": 42,
+  "custom_epoch": 1577836800000,
+  "clock_backward_wait": 10000000,
+  
+  "server_enabled": false,
+  "server_port": 8080,
+  "server_read_timeout": 10000000000,
+  "server_write_timeout": 10000000000,
+  "server_idle_timeout": 60000000000,
+  "max_header_bytes": 1048576,
+  
+  "rate_limit_enabled": true,
+  "rate_limit_rps": 1000.0,
+  "rate_limit_burst": 100,
+  
+  "max_batch_size": 10000,
+  "default_batch_size": 10,
+  
+  "auto_node_id": false,
+  "node_id_source": "config",
+  
+  "metrics_enabled": true,
+  "health_check_enabled": true,
+  
+  "worker_pool_size": 4,
+  "channel_buffer_size": 1000,
+  "gc_percent": 100
+} 
