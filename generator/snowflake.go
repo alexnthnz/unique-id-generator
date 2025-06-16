@@ -2,7 +2,6 @@ package generator
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -14,14 +13,14 @@ const (
 	CustomEpoch = 1577836800000 // milliseconds
 
 	// Bit allocation for 64-bit ID
-	SequenceBits = 12
-	NodeIDBits   = 10
+	SequenceBits  = 12
+	NodeIDBits    = 10
 	TimestampBits = 41
-	ReservedBits = 1
+	ReservedBits  = 1
 
 	// Maximum values
-	MaxSequence = (1 << SequenceBits) - 1  // 4095
-	MaxNodeID   = (1 << NodeIDBits) - 1    // 1023
+	MaxSequence  = (1 << SequenceBits) - 1  // 4095
+	MaxNodeID    = (1 << NodeIDBits) - 1    // 1023
 	MaxTimestamp = (1 << TimestampBits) - 1 // ~69 years from epoch
 
 	// Bit shifts
@@ -30,12 +29,7 @@ const (
 	ReservedShift  = SequenceBits + NodeIDBits + TimestampBits
 )
 
-var (
-	ErrInvalidNodeID      = errors.New("node ID must be between 0 and 1023")
-	ErrClockMovedBackward = errors.New("clock moved backward")
-	ErrSequenceExhausted  = errors.New("sequence exhausted for current millisecond")
-	ErrTimestampExhausted = errors.New("timestamp exhausted - epoch overflow")
-)
+// Errors are now defined in errors.go with structured error types
 
 // SnowflakeGenerator generates unique IDs using the Snowflake algorithm
 type SnowflakeGenerator struct {
@@ -59,7 +53,7 @@ type IDComponents struct {
 // NewSnowflakeGenerator creates a new Snowflake ID generator
 func NewSnowflakeGenerator(nodeID uint16, metrics *monitor.Metrics) (*SnowflakeGenerator, error) {
 	if nodeID > MaxNodeID {
-		return nil, fmt.Errorf("%w: got %d", ErrInvalidNodeID, nodeID)
+		return nil, ErrInvalidNodeID.WithNodeID(nodeID).WithContext("max_node_id", MaxNodeID)
 	}
 
 	if metrics == nil {
@@ -81,24 +75,27 @@ func (g *SnowflakeGenerator) NextID() (uint64, error) {
 	defer g.mutex.Unlock()
 
 	timestamp := g.getCurrentTimestamp()
-	
+
 	// Handle clock moving backward
 	if timestamp < g.lastTimestamp {
 		g.metrics.IncrementClockBackward()
-		
+
 		// Wait for a short time to see if clock recovers
 		time.Sleep(g.clockBackwardWait)
 		timestamp = g.getCurrentTimestamp()
-		
+
 		if timestamp < g.lastTimestamp {
-			return 0, fmt.Errorf("%w: current=%d, last=%d", 
-				ErrClockMovedBackward, timestamp, g.lastTimestamp)
+			return 0, ErrClockMovedBackward.WithNodeID(g.nodeID).
+				WithContext("current_timestamp", timestamp).
+				WithContext("last_timestamp", g.lastTimestamp)
 		}
 	}
 
 	// Check for timestamp exhaustion
 	if timestamp > MaxTimestamp {
-		return 0, ErrTimestampExhausted
+		return 0, ErrTimestampExhausted.WithNodeID(g.nodeID).
+			WithContext("current_timestamp", timestamp).
+			WithContext("max_timestamp", MaxTimestamp)
 	}
 
 	// Handle sequence management
@@ -118,7 +115,7 @@ func (g *SnowflakeGenerator) NextID() (uint64, error) {
 
 	// Construct the ID
 	id := g.constructID(timestamp, g.nodeID, g.sequence)
-	
+
 	g.metrics.IncrementGenerated()
 	return id, nil
 }
@@ -130,7 +127,7 @@ func (g *SnowflakeGenerator) BatchNextID(count int) ([]uint64, error) {
 	}
 
 	ids := make([]uint64, 0, count)
-	
+
 	for i := 0; i < count; i++ {
 		id, err := g.NextID()
 		if err != nil {
@@ -138,7 +135,7 @@ func (g *SnowflakeGenerator) BatchNextID(count int) ([]uint64, error) {
 		}
 		ids = append(ids, id)
 	}
-	
+
 	return ids, nil
 }
 
@@ -194,4 +191,4 @@ func (g *SnowflakeGenerator) GetStats() monitor.Stats {
 // SetClockBackwardWait sets the maximum wait time for clock backward recovery
 func (g *SnowflakeGenerator) SetClockBackwardWait(duration time.Duration) {
 	g.clockBackwardWait = duration
-} 
+}
